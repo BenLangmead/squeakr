@@ -224,6 +224,59 @@ void reads_to_kmers(chunk &c, flush_object *obj)
 	free(c.get_reads());
 }
 
+#ifdef SQUEAKR_TEST_MAIN
+/* main method */
+int main(int argc, char *argv[]) {
+	QF cf;
+
+	int ksize;
+	int qbits;
+	vector<string> strings;
+	using namespace clipp;
+	auto cli = (
+		required("-k","--kmer") & value("k-size", ksize) % "length of k-mers to count",
+		required("-s","--log-slots") & value("log-slots", qbits) % "log of number of slots in the CQF",
+		values("strings", strings) % "list of strings to be processed; first is genome, rest are queries",
+		option("-h", "--help")      % "show help"
+	);
+	auto res = parse(argc, argv, cli);
+
+	if(!res) {
+		cout << "Error parsing arguments" << endl;
+		cout << make_man_page(cli, argv[0]) << endl;
+		return 1;
+	}
+
+	if(strings.size() < 2) {
+		cout << "Need at least 2 string arguments" << endl;
+		cout << make_man_page(cli, argv[0]) << endl;
+		return 1;
+	}
+
+	flush_object obj;
+	obj.local_qf = NULL;
+	obj.main_qf = &cf;
+	obj.ksize = ksize;
+	obj.count = 0;
+
+	int num_hash_bits = qbits+8;	// we use 8 bits for remainders in the main QF
+	uint32_t seed = 2038074761;
+	qf_init(&cf, (1ULL<<qbits), num_hash_bits, 0, true, "", seed);
+	const __uint128_t range = cf.metadata->range;
+
+	cerr << "Building reference from: " << strings[0] << endl;
+	string_to_kmers(strings[0], &obj, false); // no locking
+
+	for(size_t i = 1; i < strings.size(); i++) {
+		uint64_t kmer = str_to_int(strings[i]);
+		uint64_t item = HashUtil::MurmurHash64A(((void*)&kmer), sizeof(kmer), seed);
+		item %= range;
+		uint64_t count = qf_count_key_value(&cf, item, 0);
+		cerr << "Count(" << strings[i] << ") = " << count << endl;
+	}
+}
+#endif
+
 #ifdef SQUEAKR_MAIN
 
 /*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/

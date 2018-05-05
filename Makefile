@@ -34,9 +34,9 @@ all: $(TARGETS)
 
 # dependencies between programs and .o files
 
-squeakr-count:                  main.o 								 hashutil.o threadsafe-gqf/gqf.o
-squeakr-query: 					 kmer_query.o 					 hashutil.o threadsafe-gqf/gqf.o
-squeakr-inner-prod: 			 kmer_inner_prod.o 			 hashutil.o threadsafe-gqf/gqf.o
+squeakr-count:					main.o						hashutil.o threadsafe-gqf/gqf.o
+squeakr-query: 					kmer_query.o				hashutil.o threadsafe-gqf/gqf.o
+squeakr-inner-prod: 			kmer_inner_prod.o			hashutil.o threadsafe-gqf/gqf.o
 
 # dependencies between .o files and .h files
 
@@ -56,6 +56,10 @@ threadsafe-gqf/gqf.o: threadsafe-gqf/gqf.c threadsafe-gqf/gqf.h
 
 $(TARGETS):
 	$(LD) $^ $(LDFLAGS) -o $@
+
+squeakr-test: main.cc hashutil.o threadsafe-gqf/gqf.o
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -DSQUEAKR_TEST_MAIN $< -c
+	$(CXX) -o $@ main.o hashutil.o threadsafe-gqf/gqf.o
 
 %.o: %.cc
 	$(CXX) $(CXXFLAGS) $(INCLUDE) $< -c -o $@
