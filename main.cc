@@ -28,10 +28,14 @@
 #include <cassert>
 #include <fstream>
 
+#ifdef SQUEAKR_MAIN
+
 #include <boost/thread/thread.hpp>
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
 #include <boost/atomic.hpp>
+
+#endif
 
 #include <time.h>
 #include <stdio.h>
@@ -73,10 +77,6 @@ struct file_pointer {
 	uint64_t part_filled{0};
 };
 
-/*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/
-boost::lockfree::queue<file_pointer*, boost::lockfree::fixed_sized<true> > ip_files(64);
-boost::atomic<int> num_files {0};
-
 /* Count distinct items in a sorted list */
 uint64_t count_distinct_kmers(multiset<uint64_t> kmers)
 {
@@ -91,6 +91,144 @@ uint64_t count_distinct_kmers(multiset<uint64_t> kmers)
 	}
 	return cnt;
 }
+
+/* dump the contents of a local QF into the main QF */
+static void dump_local_qf_to_main(flush_object *obj)
+{
+	QFi local_cfi;
+
+	if (qf_iterator(obj->local_qf, &local_cfi, 0)) {
+		do {
+			uint64_t key = 0, value = 0, count = 0;
+			qfi_get(&local_cfi, &key, &value, &count);
+			qf_insert(obj->main_qf, key, 0, count, true, true);
+		} while (!qfi_next(&local_cfi));
+		qf_reset(obj->local_qf);
+	}
+}
+
+void string_to_kmers(const string& read, flush_object *obj, bool get_lock=true) {
+	const uint32_t seed = obj->main_qf->metadata->seed;
+	const __uint128_t range = obj->main_qf->metadata->range;
+	assert(obj->local_qf == NULL || obj->local_qf->metadata->range == range);
+	assert(obj->local_qf == NULL || obj->local_qf->metadata->seed == seed);
+	size_t left_chop = 0;
+	if (read.length() - left_chop < obj->ksize) {
+		return; // start with the next read if length is smaller than K
+	}
+	do {
+		uint64_t first = 0;
+		uint64_t first_rev = 0;
+		uint64_t item = 0;
+		
+		for(int i=0; i<obj->ksize; i++) { //First kmer
+			uint8_t curr = kmer::map_base(read[left_chop + i]);
+			if (curr > DNA_MAP::G) { // 'N' is encountered
+				left_chop += (i+1);
+				continue; // BTL: does it properly check if there's <k left?
+			}
+			first = first | curr;
+			first = first << 2;
+		}
+		first = first >> 2;
+		first_rev = kmer::reverse_complement(first, obj->ksize);
+	
+		if (kmer::compare_kmers(first, first_rev))
+			item = first;
+		else
+			item = first_rev;
+	
+		// hash the kmer using murmurhash/xxHash before adding to the list
+		item = HashUtil::MurmurHash64A(((void*)&item), sizeof(item), seed);
+		/*
+		 * first try and insert in the main QF.
+		 * If lock can't be accuired in the first attempt then
+		 * insert the item in the local QF.
+		 */
+		if (!qf_insert(obj->main_qf, item%range, 0, 1, get_lock, false)) {
+			assert(obj->local_qf != NULL);
+			qf_insert(obj->local_qf, item%range, 0, 1, false, false);
+			obj->count++; // BTL: added-to-local count
+			// check of the load factor of the local QF is more than 50%
+			if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
+				dump_local_qf_to_main(obj);
+				obj->count = 0;
+			}
+		}
+		//cout<< "X " << bitset<64>(first)<<endl;
+	
+		uint64_t next = (first << 2) & BITMASK(2*obj->ksize);
+		uint64_t next_rev = first_rev >> 2;
+	
+		for(uint32_t i=obj->ksize; i < (read.length() - left_chop); i++) { //next kmers
+			uint8_t curr = kmer::map_base(read[i + left_chop]);
+			if (curr > DNA_MAP::G) { // 'N' is encountered
+				left_chop += (i+1);
+				continue;
+			}
+			next |= curr;
+			uint64_t tmp = kmer::reverse_complement_base(curr);
+			tmp <<= (obj->ksize*2-2);
+			next_rev = next_rev | tmp;
+			if (kmer::compare_kmers(next, next_rev))
+				item = next;
+			else
+				item = next_rev;
+	
+		// hash the kmer using murmurhash/xxHash before adding to the list
+			item = HashUtil::MurmurHash64A(((void*)&item), sizeof(item), seed);
+			//item = XXH63 (((void*)&item), sizeof(item), seed);
+	
+			/*
+			 * first try and insert in the main QF.
+			 * If lock can't be accuired in the first attempt then
+			 * insert the item in the local QF.
+			 */
+			if (!qf_insert(obj->main_qf, item%range, 0, 1, get_lock, false)) {
+				qf_insert(obj->local_qf, item%range, 0, 1, false, false);
+				obj->count++;
+				// check of the load factor of the local QF is more than 50%
+				if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
+					dump_local_qf_to_main(obj);
+					obj->count = 0;
+				}
+			}
+			next = (next << 2) & BITMASK(2*obj->ksize);
+			next_rev = next_rev >> 2;
+		}
+	} while(false);
+}
+
+/* convert a chunk of the fastq file into kmers */
+void reads_to_kmers(chunk &c, flush_object *obj)
+{
+	auto fs = c.get_reads();
+	auto fe = c.get_reads();
+	auto end = fs + c.get_size();
+	while (fs && fs!=end) {
+		fs = static_cast<char*>(memchr(fs, '\n', end-fs)); // ignore the first line
+		fs++; // increment the pointer
+
+		fe = static_cast<char*>(memchr(fs, '\n', end-fs)); // read the read
+		string read(fs, fe-fs);
+		/*cout << read << endl;*/
+
+		string_to_kmers(read, obj);
+
+		fs = ++fe;		// increment the pointer
+		fs = static_cast<char*>(memchr(fs, '\n', end-fs)); // ignore one line
+		fs++; // increment the pointer
+		fs = static_cast<char*>(memchr(fs, '\n', end-fs)); // ignore one more line
+		fs++; // increment the pointer
+	}
+	free(c.get_reads());
+}
+
+#ifdef SQUEAKR_MAIN
+
+/*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/
+boost::lockfree::queue<file_pointer*, boost::lockfree::fixed_sized<true> > ip_files(64);
+boost::atomic<int> num_files {0};
 
 /* Print elapsed time using the start and end timeval */
 void print_time_elapsed(string desc, struct timeval* start, struct timeval* end)
@@ -219,172 +357,6 @@ static bool fastq_read_parts(int mode, file_pointer *fp)
 	part_filled = total_filled - _size;
 
 	return true;
-}
-
-/* dump the contents of a local QF into the main QF */
-static void dump_local_qf_to_main(flush_object *obj)
-{
-	QFi local_cfi;
-
-	if (qf_iterator(obj->local_qf, &local_cfi, 0)) {
-		do {
-			uint64_t key = 0, value = 0, count = 0;
-			qfi_get(&local_cfi, &key, &value, &count);
-			qf_insert(obj->main_qf, key, 0, count, true, true);
-		} while (!qfi_next(&local_cfi));
-		qf_reset(obj->local_qf);
-	}
-}
-
-// BTL: is reads_to_kmers the right place to enter?
-
-// BTL: are the reads expected in a particular format?
-//      - yes, the code assumes FASTQ
-
-// BTL: What are relevant fields of obj?
-//      - ksize
-//      - obj->main_qf
-//      - obj->local_qf
-//      - obj->count
-
-// BTL: What does this call?
-//      - memchr (locates first occurrence of char in string)
-//      - kmer::reverse_complement
-//      - HashUtil::MurmurHash64A
-//      - qf_insert
-//      - dump_local_qf_to_main
-//          + qfi_get
-//          + qf_insert (on main)
-//          + qfi_next (on local)
-//          + qf_reset (on local)
-
-
-/* convert a chunk of the fastq file into kmers */
-void reads_to_kmers(chunk &c, flush_object *obj)
-{
-	auto fs = c.get_reads();
-	auto fe = c.get_reads();
-	auto end = fs + c.get_size();
-	while (fs && fs!=end) {
-		fs = static_cast<char*>(memchr(fs, '\n', end-fs)); // ignore the first line
-		fs++; // increment the pointer
-
-		fe = static_cast<char*>(memchr(fs, '\n', end-fs)); // read the read
-		string read(fs, fe-fs);
-		/*cout << read << endl;*/
-
-		// BTL: it would seem to make sense to break this out into a separate function
-start_read:
-		if (read.length() < obj->ksize) // start with the next read if length is smaller than K
-			goto next_read;
-		{
-			uint64_t first = 0;
-			uint64_t first_rev = 0;
-			uint64_t item = 0;
-			//cout << "K " << read.substr(0,K) << endl;
-			for(int i=0; i<obj->ksize; i++) { //First kmer
-				uint8_t curr = kmer::map_base(read[i]);
-				if (curr > DNA_MAP::G) { // 'N' is encountered
-					read = read.substr(i+1, read.length());
-					goto start_read; // BTL: does it properly check if there's <k left?
-				}
-				first = first | curr;
-				first = first << 2;
-			}
-			first = first >> 2; // BTL: went one too far
-			// BTL: could first_rev by 
-			first_rev = kmer::reverse_complement(first, obj->ksize);
-
-			//cout << "kmer: "; cout << int_to_str(first);
-			//cout << " reverse-comp: "; cout << int_to_str(first_rev) << endl;
-
-			if (kmer::compare_kmers(first, first_rev))
-				item = first;
-			else
-				item = first_rev;
-
-			// hash the kmer using murmurhash/xxHash before adding to the list
-			item = HashUtil::MurmurHash64A(((void*)&item), sizeof(item),
-																		 obj->local_qf->metadata->seed);
-			/*
-			 * first try and insert in the main QF.
-			 * If lock can't be accuired in the first attempt then
-			 * insert the item in the local QF.
-			 */
-			// BTL: bool qf_insert(QF *qf, uint64_t key, uint64_t value, uint64_t count,
-			//                     bool lock, bool spin);
-			// BTL: does it make sense that value is 0?
-			if (!qf_insert(obj->main_qf, item%obj->main_qf->metadata->range, 0, 1,
-										 true, false)) {
-				qf_insert(obj->local_qf, item%obj->local_qf->metadata->range, 0, 1,
-									false, false);
-				obj->count++; // BTL: added-to-local count
-				// check of the load factor of the local QF is more than 50%
-				if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-					dump_local_qf_to_main(obj);
-					obj->count = 0;
-				}
-			}
-			//cout<< "X " << bitset<64>(first)<<endl;
-
-			uint64_t next = (first << 2) & BITMASK(2*obj->ksize);
-			uint64_t next_rev = first_rev >> 2;
-
-			for(uint32_t i=obj->ksize; i<read.length(); i++) { //next kmers
-				//cout << "K: " << read.substr(i-K+1,K) << endl;
-				uint8_t curr = kmer::map_base(read[i]);
-				if (curr > DNA_MAP::G) { // 'N' is encountered
-					read = read.substr(i+1, read.length());
-					goto start_read; // BTL: start from scratch
-				}
-				next |= curr;
-				// BTL: they are indeed incrementally updating the revcomp
-				uint64_t tmp = kmer::reverse_complement_base(curr);
-				tmp <<= (obj->ksize*2-2);
-				next_rev = next_rev | tmp;
-				if (kmer::compare_kmers(next, next_rev))
-					item = next;
-				else
-					item = next_rev;
-
-			// hash the kmer using murmurhash/xxHash before adding to the list
-				item = HashUtil::MurmurHash64A(((void*)&item), sizeof(item),
-																			 obj->local_qf->metadata->seed);
-				//item = XXH63 (((void*)&item), sizeof(item), seed);
-
-				/*
-				 * first try and insert in the main QF.
-				 * If lock can't be accuired in the first attempt then
-				 * insert the item in the local QF.
-				 */
-				if (!qf_insert(obj->main_qf, item%obj->main_qf->metadata->range, 0, 1, true,
-											 false)) {
-					qf_insert(obj->local_qf, item%obj->local_qf->metadata->range, 0, 1, false,
-										false);
-					obj->count++;
-					// check of the load factor of the local QF is more than 50%
-					if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-						dump_local_qf_to_main(obj);
-						obj->count = 0;
-					}
-				}
-
-				//cout<<bitset<64>(next)<<endl;
-				//assert(next == str_to_int(read.substr(i-K+1,K)));
-
-				next = (next << 2) & BITMASK(2*obj->ksize);
-				next_rev = next_rev >> 2;
-			}
-		}
-
-next_read:
-		fs = ++fe;		// increment the pointer
-		fs = static_cast<char*>(memchr(fs, '\n', end-fs)); // ignore one line
-		fs++; // increment the pointer
-		fs = static_cast<char*>(memchr(fs, '\n', end-fs)); // ignore one more line
-		fs++; // increment the pointer
-	}
-	free(c.get_reads());
 }
 
 /* read a part of the fastq file, parse it, convert the reads to kmers, and
@@ -627,4 +599,4 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
-
+#endif //SQUEAKR_MAIN
