@@ -236,6 +236,29 @@ static void dump_local_qf_to_main(flush_object *obj)
 	}
 }
 
+// BTL: is reads_to_kmers the right place to enter?
+
+// BTL: are the reads expected in a particular format?
+//      - yes, the code assumes FASTQ
+
+// BTL: What are relevant fields of obj?
+//      - ksize
+//      - obj->main_qf
+//      - obj->local_qf
+//      - obj->count
+
+// BTL: What does this call?
+//      - memchr (locates first occurrence of char in string)
+//      - kmer::reverse_complement
+//      - HashUtil::MurmurHash64A
+//      - qf_insert
+//      - dump_local_qf_to_main
+//          + qfi_get
+//          + qf_insert (on main)
+//          + qfi_next (on local)
+//          + qf_reset (on local)
+
+
 /* convert a chunk of the fastq file into kmers */
 void reads_to_kmers(chunk &c, flush_object *obj)
 {
@@ -250,6 +273,7 @@ void reads_to_kmers(chunk &c, flush_object *obj)
 		string read(fs, fe-fs);
 		/*cout << read << endl;*/
 
+		// BTL: it would seem to make sense to break this out into a separate function
 start_read:
 		if (read.length() < obj->ksize) // start with the next read if length is smaller than K
 			goto next_read;
@@ -262,12 +286,13 @@ start_read:
 				uint8_t curr = kmer::map_base(read[i]);
 				if (curr > DNA_MAP::G) { // 'N' is encountered
 					read = read.substr(i+1, read.length());
-					goto start_read;
+					goto start_read; // BTL: does it properly check if there's <k left?
 				}
 				first = first | curr;
 				first = first << 2;
 			}
-			first = first >> 2;
+			first = first >> 2; // BTL: went one too far
+			// BTL: could first_rev by 
 			first_rev = kmer::reverse_complement(first, obj->ksize);
 
 			//cout << "kmer: "; cout << int_to_str(first);
@@ -286,11 +311,14 @@ start_read:
 			 * If lock can't be accuired in the first attempt then
 			 * insert the item in the local QF.
 			 */
+			// BTL: bool qf_insert(QF *qf, uint64_t key, uint64_t value, uint64_t count,
+			//                     bool lock, bool spin);
+			// BTL: does it make sense that value is 0?
 			if (!qf_insert(obj->main_qf, item%obj->main_qf->metadata->range, 0, 1,
 										 true, false)) {
 				qf_insert(obj->local_qf, item%obj->local_qf->metadata->range, 0, 1,
 									false, false);
-				obj->count++;
+				obj->count++; // BTL: added-to-local count
 				// check of the load factor of the local QF is more than 50%
 				if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
 					dump_local_qf_to_main(obj);
@@ -307,9 +335,10 @@ start_read:
 				uint8_t curr = kmer::map_base(read[i]);
 				if (curr > DNA_MAP::G) { // 'N' is encountered
 					read = read.substr(i+1, read.length());
-					goto start_read;
+					goto start_read; // BTL: start from scratch
 				}
 				next |= curr;
+				// BTL: they are indeed incrementally updating the revcomp
 				uint64_t tmp = kmer::reverse_complement_base(curr);
 				tmp <<= (obj->ksize*2-2);
 				next_rev = next_rev | tmp;
