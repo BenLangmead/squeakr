@@ -41,6 +41,10 @@ def cqf_new_db(ksize, qbits, seed, create_local=False):
     return flush_object
 
 
+def cqf_injest(db, s):
+    lib.string_injest(s, len(s), db, 0)
+
+
 def cqf_query(db, st):
     """
     Query the given CQF with k-mers from the given string.  Return a C array
