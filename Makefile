@@ -19,7 +19,7 @@ ifdef P
 endif
 
 CXX = g++ -std=c++11
-CC = g++ -std=c++11
+CC = gcc -std=gnu99
 LD= g++ -std=c++11
 
 CXXFLAGS += -Wall $(DEBUG) $(PROFILE) $(OPT) $(ARCH) -m64 -I. -Wno-unused-result -Wno-strict-aliasing -Wno-unused-function -Wno-sign-compare
@@ -34,9 +34,9 @@ all: $(TARGETS)
 
 # dependencies between programs and .o files
 
-squeakr-count:                  main.o 								 hashutil.o threadsafe-gqf/gqf.o
-squeakr-query: 					 kmer_query.o 					 hashutil.o threadsafe-gqf/gqf.o
-squeakr-inner-prod: 			 kmer_inner_prod.o 			 hashutil.o threadsafe-gqf/gqf.o
+squeakr-count:					main.o						hashutil.o threadsafe-gqf/gqf.o
+squeakr-query: 					kmer_query.o				hashutil.o threadsafe-gqf/gqf.o
+squeakr-inner-prod: 			kmer_inner_prod.o			hashutil.o threadsafe-gqf/gqf.o
 
 # dependencies between .o files and .h files
 
@@ -57,6 +57,11 @@ threadsafe-gqf/gqf.o: threadsafe-gqf/gqf.c threadsafe-gqf/gqf.h
 $(TARGETS):
 	$(LD) $^ $(LDFLAGS) -o $@
 
+squeakr-test: squeakr_c_api.c squeakr_c_api.h threadsafe-gqf/gqf.c threadsafe-gqf/gqf.h
+	$(CC) $(CXXFLAGS) $(INCLUDE) threadsafe-gqf/gqf.c -c
+	$(CC) $(CXXFLAGS) $(INCLUDE) -DSQUEAKR_TEST_MAIN $< -c
+	$(CC) -o $@ squeakr_c_api.o gqf.o
+
 %.o: %.cc
 	$(CXX) $(CXXFLAGS) $(INCLUDE) $< -c -o $@
 
@@ -64,5 +69,5 @@ $(TARGETS):
 	$(CC) $(CXXFLAGS) $(INCLUDE) $< -c -o $@
 
 clean:
-	rm -f *.o threadsafe-gqf/gqf.o $(TARGETS)
+	rm -f *.o threadsafe-gqf/gqf.o $(TARGETS) squeakr-test
 
