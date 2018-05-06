@@ -1,3 +1,13 @@
+#!/usr/bin/env python
+
+"""
+Author: Ben Langmead
+Contact: ben.langmead@gmail.com
+
+Example Python script with functions for allocating, populating and querying a
+CQF.  Uses CFFI.  Run squeakr_build.py first.
+"""
+
 from _api import ffi, lib
 
 

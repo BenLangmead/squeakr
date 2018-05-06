@@ -1,8 +1,12 @@
-# file "example_build.py"
+#!/usr/bin/env python
 
-# Note: we instantiate the same 'cffi.FFI' class as in the previous
-# example, but call the result 'ffibuilder' now instead of 'ffi';
-# this is to avoid confusion with the other 'ffi' object you get below
+"""
+Author: Ben Langmead
+Contact: ben.langmead@gmail.com
+
+CFFI generator file.  Used to build object files that can then be used from
+python after "from _api import ffi, lib".
+"""
 
 from cffi import FFI
 ffibuilder = FFI()

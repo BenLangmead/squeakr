@@ -1,3 +1,10 @@
+/*
+ * Author: Ben Langmead
+ * Contact: ben.langmead@gmail.com
+ *
+ * A C API for the CQF.
+ */
+
 #ifndef _SQUEAKR_C_API_H_
 #define _SQUEAKR_C_API_H_
 
