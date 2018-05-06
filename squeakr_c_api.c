@@ -48,7 +48,6 @@ static inline uint8_t map_base(char base) {
 		default:  { return DNA_G+1; }
 	}
 }
-squeakr_c_api.c
 
 /* Return the reverse complement of a base */
 static inline int reverse_complement_base(int x) { return 3 - x; }
@@ -263,20 +262,25 @@ int string_query(const char *read_orig,
 		uint64_t first_rev = 0;
 		uint64_t item = 0;
 		
+		int do_continue = 0;
 		for(int i = 0; i<obj->ksize; i++) {
 			uint8_t curr = map_base(read[i]);
 			if (curr > DNA_G) { // 'N' is encountered
 				// append -1s for k-mers that include a non-ACGT 
-				for(int j = 0; j <= i; j++) {
+				for(int j = 0; j <= i && j + obj->ksize <= read_len; j++) {
 					*cur_count++ = -1;
 					assert(cur_count - count_array <= count_array_len);
 				}
 				read += (i+1);
 				read_len -= (i+1);
-				continue;
+				do_continue = 1;
+				break;
 			}
 			first = first | curr;
 			first = first << 2;
+		}
+		if(do_continue) {
+			continue;
 		}
 		first = first >> 2;
 		first_rev = reverse_complement(first, obj->ksize);
@@ -293,7 +297,6 @@ int string_query(const char *read_orig,
 		assert(read_len >= obj->ksize);
 		read_len -= obj->ksize;
 
-		int do_continue = 0;
 		for(uint32_t i = 0; i < read_len; i++) { //next kmers
 			uint8_t curr = map_base(read[i]);
 			if (curr > DNA_G) { // 'N' is encountered
