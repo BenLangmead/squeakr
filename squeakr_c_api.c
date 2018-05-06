@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <ctype.h>
 
 #define BITMASK(nbits) ((nbits) == 64 ? 0xffffffffffffffff : \
                                         (1ULL << (nbits)) - 1ULL)
@@ -39,7 +40,7 @@ enum DNA_MAP {DNA_C, DNA_A, DNA_T, DNA_G};  // A=1, C=0, T=2, G=3
 
 /*return the integer representation of the base */
 static inline uint8_t map_base(char base) {
-	switch(base) {
+	switch(toupper(base)) {
 		case 'A': { return DNA_A; }
 		case 'T': { return DNA_T; }
 		case 'C': { return DNA_C; }
@@ -47,6 +48,7 @@ static inline uint8_t map_base(char base) {
 		default:  { return DNA_G+1; }
 	}
 }
+squeakr_c_api.c
 
 /* Return the reverse complement of a base */
 static inline int reverse_complement_base(int x) { return 3 - x; }
