@@ -237,6 +237,109 @@ void string_injest(const char *read,
 	} while(false);
 }
 
+size_t file_injest(FILE *input,
+				   struct flush_object *obj,
+				   int get_lock)
+{
+	const uint32_t seed = obj->main_qf->metadata->seed;
+	const __uint128_t range = obj->main_qf->metadata->range;
+	assert(obj->local_qf == NULL || obj->local_qf->metadata->range == range);
+	assert(obj->local_qf == NULL || obj->local_qf->metadata->seed == seed);
+	const uint32_t ksize = obj->ksize;
+	size_t n_injested = 0;
+	while(!feof(input)) {
+		uint64_t first = 0;
+		uint64_t first_rev = 0;
+		uint64_t item = 0;
+		
+		int do_continue = 0;
+		for(uint32_t i = 0; i < ksize; i++) {
+			int c;
+			do {
+				c = fgetc(input);
+			} while(isspace(c));
+			if(c == EOF) {
+				return n_injested;
+			}
+			uint8_t curr = map_base(c);
+			if (curr > DNA_G) { // Non-ACGT
+				do_continue = 1;
+				break;
+			}
+			first = first | curr;
+			first = first << 2;
+		}
+		if(do_continue) {
+			continue;
+		}
+		first = first >> 2;
+		first_rev = reverse_complement(first, obj->ksize);
+		item = compare_kmers(first, first_rev) ? first : first_rev;
+		item = MurmurHash64A(((void*)&item), sizeof(item), seed);
+		item %= range;
+		
+		/*
+		 * first try and insert in the main QF.
+		 * If lock can't be accuired in the first attempt then
+		 * insert the item in the local QF.
+		 */
+		if (!qf_insert(obj->main_qf, item, 0, 1, get_lock, false)) {
+			assert(obj->local_qf != NULL);
+			qf_insert(obj->local_qf, item, 0, 1, false, false);
+			obj->count++;
+			// check of the load factor of the local QF is more than 50%
+			if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
+				dump_local_qf_to_main(obj);
+				obj->count = 0;
+			}
+		}
+		n_injested++;
+		
+		uint64_t next = (first << 2) & BITMASK(2*obj->ksize);
+		uint64_t next_rev = first_rev >> 2;
+		
+		while(1) {
+			int c;
+			do {
+				c = fgetc(input);
+			} while(isspace(c));
+			if(c == EOF) {
+				return n_injested;
+			}
+			uint8_t curr = map_base(c);
+			if (curr > DNA_G) { // Non-ACGT
+				do_continue = 1;
+			}
+			next |= curr;
+			uint64_t tmp = reverse_complement_base(curr);
+			tmp <<= (obj->ksize*2-2);
+			next_rev = next_rev | tmp;
+			item = compare_kmers(next, next_rev) ? next : next_rev;
+			item = MurmurHash64A(((void*)&item), sizeof(item), seed);
+			item %= range;
+			
+			/*
+			 * first try and insert in the main QF.
+			 * If lock can't be accuired in the first attempt then
+			 * insert the item in the local QF.
+			 */
+			if (!qf_insert(obj->main_qf, item, 0, 1, get_lock, false)) {
+				qf_insert(obj->local_qf, item, 0, 1, false, false);
+				obj->count++;
+				// check of the load factor of the local QF is more than 50%
+				if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
+					dump_local_qf_to_main(obj);
+					obj->count = 0;
+				}
+			}
+			n_injested++;
+			next = (next << 2) & BITMASK(2*obj->ksize);
+			next_rev = next_rev >> 2;
+		}
+	}
+	return n_injested;
+}
+
 /**
  * Assumes no locking is needed, i.e. that no other thread
  * is trying to update the CQF.
@@ -329,17 +432,36 @@ int string_query(const char *read_orig,
 }
 
 #ifdef SQUEAKR_TEST_MAIN
+void usage() {
+	fprintf(stderr, "squeakr-test <command> <command-args>*\n");
+	fprintf(stderr, "Commands:\n");
+	fprintf(stderr, "  file <ksize> <qbits> <input-filename> <query-1> [<query-N>]*\n");
+	fprintf(stderr, "  string <ksize> <qbits> <reference-string> <query-1> [<query-N>]*\n");
+}
+
 /* main method */
 int main(int argc, char *argv[]) {
 	QF cf;
-	
-	if(argc < 5) {
-		fprintf(stderr, "Need at least 4 args\n");
+
+	if(argc < 6) {
+		usage();
 		return 1;
 	}
 	
-	int ksize = atoi(argv[1]);
-	int qbits = atoi(argv[2]);
+	int do_file = 0;
+	if(strcmp(argv[1], "file") == 0) {
+		do_file = 1;
+	} else if(strcmp(argv[1], "string") == 0) {
+		// nothing
+	} else {
+		fprintf(stderr, "Bad command: \"");
+		fputs(argv[1], stderr);
+		fprintf(stderr, "\"\n");
+		return 1;
+	}
+	
+	int ksize = atoi(argv[2]);
+	int qbits = atoi(argv[3]);
 	
 	fprintf(stderr, "Using ksize: %d\n", ksize);
 	fprintf(stderr, "Using qbits: %d\n", qbits);
@@ -354,10 +476,37 @@ int main(int argc, char *argv[]) {
 	uint32_t seed = 2038074761;
 	qf_init(&cf, (1ULL<<qbits), num_hash_bits, 0, true, "", seed);
 	
-	fprintf(stderr, "Building reference from: %s\n", argv[3]);
-	string_injest(argv[3], strlen(argv[3]), &obj, false); // no locking
+	if(do_file) {
+		fprintf(stderr, "Building reference from file: %s\n", argv[4]);
+		FILE *in = fopen(argv[4], "rb");
+		if(in == NULL) {
+			fprintf(stderr, "Unable to open file: %s\n", argv[4]);
+			return 1;
+		}
+		file_injest(in, &obj, false); // no locking
+		fclose(in);
+	} else {
+		fprintf(stderr, "Building reference from string: %s\n", argv[4]);
+		string_injest(argv[4], strlen(argv[4]), &obj, false); // no locking
+	}
 	
-	for(size_t i = 4; i < argc; i++) {
+	{ // Metadata info calculated lazily as part of qfi_get
+		fprintf(stderr, "Calculating freq distribution\n");
+		uint64_t max_cnt = 0;
+		QFi cfi;
+		qf_iterator(&cf, &cfi, 0);
+		do {
+			uint64_t key = 0, value = 0, count = 0;
+			qfi_get(&cfi, &key, &value, &count);
+			if(max_cnt < count) max_cnt = count;
+		} while (!qfi_next(&cfi));
+
+		fprintf(stderr, "Max freq: %llu\n", max_cnt);
+		fprintf(stderr, "# distinct elements: %llu\n", cf.metadata->ndistinct_elts);
+		fprintf(stderr, "# elements: %llu\n", cf.metadata->nelts);
+	}
+	
+	for(size_t i = 5; i < argc; i++) {
 		size_t len = strlen(argv[i]);
 		size_t results_len = len - ksize + 1;
 		int64_t *results = (int64_t*)malloc(sizeof(int64_t) * results_len);
@@ -365,6 +514,9 @@ int main(int argc, char *argv[]) {
 			fprintf(stderr, "ERROR: could not allocate results\n");
 			return 1;
 		}
+		fprintf(stderr, "Querying with: \"");
+		fputs(argv[i], stderr);
+		fprintf(stderr, "\"\n");
 		int nres = string_query(argv[i], len, results, results_len, &obj);
 		assert(nres == (int)results_len);
 		for(int j = 0; j < nres; j++) {
